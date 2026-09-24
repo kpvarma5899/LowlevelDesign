@@ -1,6 +1,6 @@
 :root {
-  --paper: #f4efe6;
-  --paper-2: #fbf8f2;
+  --paper: #f3e6c8;
+  --paper-2: #fbf3e2;
   --ink: #1c1712;
   --muted: #655d53;
   --rule: #e0d6c8;
@@ -17,7 +17,7 @@
 
 * { box-sizing: border-box; }
 
-html { scroll-behavior: smooth; }
+html { scroll-behavior: smooth; background: #f3e6c8; }
 
 body {
   margin: 0;

@@ -158,6 +158,26 @@ ClickPublisher.publish(ClickEvent)   // non-blocking</code></pre>
         <div class="qa-body"><p>Creation, per user and per IP. Redirects are sometimes abused by bots scanning the code space. A cheap reject for obviously invalid codes (wrong length, bad alphabet) happens before Redis. A bloom filter of known codes is a later optimization, not the core design.</p>
 <p>See <a href="../rate-limiter/">rate limiter</a> for the limiter itself. Limit <code>POST /v1/urls</code>. Give <code>GET /{shortCode}</code> a much higher ceiling whose job is to blunt random scanning. A viral link is a cache problem, not a rate-limit problem.</p></div>
       </details>
+<details class="qa">
+        <summary>How do you keep redirects fast once the table is large?</summary>
+        <div class="qa-body"><p><code>short_code</code> is the primary key, so the read is an index point lookup, not a scan. That is still disk. Put the mapping in Redis. A CDN or an edge worker is the step after you know which codes are hot, not the opening design: invalidation, cost, and a deleted link that keeps redirecting are the bill. Most of the win is the cache in front of one indexed table.</p></div>
+      </details>
+<details class="qa">
+        <summary>The owner deletes the link or changes the target</summary>
+        <div class="qa-body"><p>Update or delete the row, then delete the cache key in the same request. A redirect that only trusts Redis keeps sending people to the old URL until the TTL. Expiry is checked on read, so a stale cache entry can still return 410. This is also why every link does not live at the CDN from day one.</p></div>
+      </details>
+<details class="qa">
+        <summary>Which database, and when do you shard?</summary>
+        <div class="qa-body"><p>About 500 bytes a row. A billion links is a few hundred GB. One Postgres is enough, and you pick it because the unique index is the lock. Writes are tens to hundreds per second once reads are cached. Shard when a single primary cannot take the write rate or the working set, not because the interview said &quot;scale.&quot;</p></div>
+      </details>
+<details class="qa">
+        <summary>Many write servers need one counter</summary>
+        <div class="qa-body"><p>A single Redis <code>INCR</code> per create is comfortable at this write rate, and Redis runs one command at a time so two callers cannot get the same number. To cut round trips, each server leases a block, for example 1,000 ids, and hands them out locally. A crash burns the unused tail. Gaps are fine. Across regions, give each region a disjoint range so they do not coordinate. If Redis fails before the increment is replicated, you lose a few values and the unique constraint rejects a duplicate code. A billion ids is still six base62 characters.</p></div>
+      </details>
+<details class="qa">
+        <summary>Someone uses you as a phishing host</summary>
+        <div class="qa-body"><p>Reject anything that is not <code>http</code> or <code>https</code> on create. Do not follow redirects while you validate the target. Rate-limit create per user and per IP. A domain blocklist is a product decision you name, not a lookup on the redirect path. Scanning the code space is a cheap alphabet-and-length reject before Redis, plus a high ceiling on <code>GET</code>, not the same limit as create.</p></div>
+      </details>
 <h2 id="last-five-minutes">Last five minutes</h2>
 <ul><li><strong>Single points of failure:</strong> the id lease service if you chose ranges; the primary for creates. Redirect is designed to survive without either, for cached keys.</li><li><strong>What you monitor:</strong> redirect p99, cache hit rate, create error rate, unique-constraint conflicts, Kafka consumer lag, replication lag.</li><li><strong>What breaks at 10×:</strong> not storage. Hot keys, cache stampede, and click-event volume. The next design change is partitioning the analytics stream and treating the top keys as their own cache tier.</li></ul></article>
     <footer class="end">

@@ -158,7 +158,7 @@ Two gateway nodes, one token left. Each does GET, sees 1, decides to allow, then
 | Write | SET 0 | SET 0 | 0 |
 | Outcome | allowed | allowed | 2 spends of 1 token |
 
-Stop splitting the read and the write across the network. Redis runs the refill and the decrement inside one Lua script, and Redis runs that script atomically on the key. The second caller sees the first caller's result. An application mutex orders threads inside one process. It does not order two processes.
+GET, decide, SET on both servers allows the request twice. The serialization point has to be the place that holds the counter. One Lua script on that Redis key refills and decrements before anyone else runs. `MULTI`/`EXEC` does not save a design that still reads in one round trip and writes in another. `INCR` cannot express "add the elapsed refill, then subtract, or do neither." A `SETNX` lock is a second round trip and a TTL to get wrong. The Redis event loop is the lock. An application mutex does not extend to the other pod.
 
 `INCR` plus `EXPIRE` is atomic enough for a fixed-window counter, and it is still the wrong algorithm because of the boundary bug. For a token bucket, `INCR` cannot express "add the elapsed refill, then subtract one, and do both or neither."
 
@@ -277,3 +277,23 @@ Limit create, per user and per IP. Creation is the abuse path: filling the key s
 ### What breaks first at 10×?
 
 Not memory. The first break is Redis CPU on the hottest keys, then the gateway thread pool if a slow Redis is allowed to occupy a thread per request. The change you make is a tight timeout, a local deny-cache, and collapsing every rule for a request into one script. A bigger Redis comes after the working set of keys has actually outgrown memory.
+
+### How do you get to a million checks a second?
+
+One Redis does on the order of 100,000 operations a second, and a token-bucket check is a read-modify-write, so one node falls over well before a million requests. Shard by the identity you limit on: user id, API key, or IP. The same client must always land on the same shard, or the bucket splits and the limit becomes N times too large. Consistent hashing, or Redis Cluster hash slots, does that routing. Ten shards is the shape of the answer, not a bigger single box.
+
+### How do you keep the extra hop under a millisecond?
+
+Same availability zone, a connection pool, and one script. A new TCP handshake per check is tens of milliseconds and is the bug. Do not cache an allow in the process. A stale bucket over-admits. The local cache is for denials only. Multi-region is a product decision: pin the identity to a home region, or accept that two regions each enforce their own ceiling.
+
+### Redis is down during a traffic spike. Fail open or closed?
+
+Say which product you are protecting. Ordinary APIs fail open behind a local emergency cap. Login, OTP, and payment create fail closed. A feed or a viral write path can also fail closed: if Redis died because traffic already spiked, failing open dumps that spike onto the database. The timeout is a few milliseconds. A Redis that answers in 800 ms is a failed Redis. Replicas and automatic failover are how you avoid the choice. They are not a substitute for having made it. The fail-open count has to be on the dashboard.
+
+### An endpoint has no rule. A rule has to change during an incident.
+
+A missing endpoint uses a default limit. You do not reject the request because configuration is absent. Rules that change without a deploy are polled, on the order of every 30 seconds, from a table the gateways cache. That delay is fine for a plan change and too slow for an attack in progress. Push, from a config service or pub/sub, is the step you name when the limit has to move in seconds. You do not start with that machinery.
+
+### A corporate NAT shares one IP across a thousand employees
+
+The IP limit has to sit higher than the user limit, or the office looks like an attacker. Prefer the authenticated user id when you have it, then the API key, then the IP. The IP rule is the coarse fuse for anonymous traffic, not the customer's plan.

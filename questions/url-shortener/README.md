@@ -241,6 +241,26 @@ Creation, per user and per IP. Redirects are sometimes abused by bots scanning t
 
 See [rate limiter](../rate-limiter/README.md) for the limiter itself. Limit `POST /v1/urls`. Give `GET /{shortCode}` a much higher ceiling whose job is to blunt random scanning. A viral link is a cache problem, not a rate-limit problem.
 
+### How do you keep redirects fast once the table is large?
+
+`short_code` is the primary key, so the read is an index point lookup, not a scan. That is still disk. Put the mapping in Redis. A CDN or an edge worker is the step after you know which codes are hot, not the opening design: invalidation, cost, and a deleted link that keeps redirecting are the bill. Most of the win is the cache in front of one indexed table.
+
+### The owner deletes the link or changes the target
+
+Update or delete the row, then delete the cache key in the same request. A redirect that only trusts Redis keeps sending people to the old URL until the TTL. Expiry is checked on read, so a stale cache entry can still return 410. This is also why every link does not live at the CDN from day one.
+
+### Which database, and when do you shard?
+
+About 500 bytes a row. A billion links is a few hundred GB. One Postgres is enough, and you pick it because the unique index is the lock. Writes are tens to hundreds per second once reads are cached. Shard when a single primary cannot take the write rate or the working set, not because the interview said "scale."
+
+### Many write servers need one counter
+
+A single Redis `INCR` per create is comfortable at this write rate, and Redis runs one command at a time so two callers cannot get the same number. To cut round trips, each server leases a block, for example 1,000 ids, and hands them out locally. A crash burns the unused tail. Gaps are fine. Across regions, give each region a disjoint range so they do not coordinate. If Redis fails before the increment is replicated, you lose a few values and the unique constraint rejects a duplicate code. A billion ids is still six base62 characters.
+
+### Someone uses you as a phishing host
+
+Reject anything that is not `http` or `https` on create. Do not follow redirects while you validate the target. Rate-limit create per user and per IP. A domain blocklist is a product decision you name, not a lookup on the redirect path. Scanning the code space is a cheap alphabet-and-length reject before Redis, plus a high ceiling on `GET`, not the same limit as create.
+
 ## Last five minutes
 
 - **Single points of failure:** the id lease service if you chose ranges; the primary for creates. Redirect is designed to survive without either, for cached keys.
