@@ -127,6 +127,7 @@ function readOpening(blocks, page) {
       }
     }
     if (block.type === "p") {
+      if (/^Page:/i.test(plain(block.text))) continue;
       if (!opening.lede) opening.lede = block.text;
       else opening.preface.push(block.text);
     }

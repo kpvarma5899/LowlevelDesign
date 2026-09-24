@@ -1,13 +1,11 @@
-# URL shortener implementation
+# URL shortener
 
-Not written yet.
+Source for this question lives in this folder. The problem is the [note](../README.md). The readable page is https://kpvarma5899.github.io/LowlevelDesign/url-shortener/.
 
-When this is built, it follows the note beside this folder:
+The implementation is not written yet. When it is, these are the patterns:
 
-- `UrlService.create` and `UrlService.resolve`
-- `IdGenerator` that stays unique across threads
-- `Encoder` as base62 over an obfuscated id
-- Uniqueness enforced by the repository, not by an in-memory set
-- Redirect reads. It does not increment a click counter on the link row.
+- **Strategy.** `IdGenerator` (Snowflake, or a leased range) and `Encoder` (base62 of an obfuscated id). Create picks them. Resolve does not.
+- **Repository.** `UrlRepository` is the unique constraint. An alias race is `409` from the database, not a check against an in-memory set.
+- **Service.** `UrlService.create` writes the row and fills the cache. `UrlService.resolve` only reads. It does not increment a click counter on the link row.
 
-Tests should cover an alias race, and a resolve that does not write the link row.
+Tests cover the alias race, and a resolve that does not write the link row.

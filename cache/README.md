@@ -8,7 +8,7 @@ node cache/canvas-to-pages.mjs
 
 Run that from the repository root. A question is `questions/<slug>/`:
 
-- `README.md` — the note. This is the publishable form of the design canvas.
+- `README.md` — the problem. The first line after the title is the page link. The renderer skips that line.
 - `page.json` — number, kicker, and stats when the note has no stat table.
 - `src/` — reserved for the implementation. The renderer does not read it.
 

@@ -1,5 +1,7 @@
 # Design a URL shortener
 
+**Page:** https://kpvarma5899.github.io/LowlevelDesign/url-shortener/
+
 At 5 years of experience, a correct diagram is the opening. The score comes from the questions after it: how ids are generated, what happens under a race, and what you refuse to do on the hot path.
 
 **High-level design** is the system: who talks to whom, where data lives, and what you trade away to hit scale, latency, and availability.

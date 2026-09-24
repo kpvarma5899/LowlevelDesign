@@ -1,5 +1,7 @@
 # Design a rate limiter
 
+**Page:** https://kpvarma5899.github.io/LowlevelDesign/rate-limiter/
+
 High-level design is a thin shell here. The score is the algorithm, the race between two servers, and what you do when the limiter itself is sick.
 
 **Close on this:** decide with one atomic check-and-consume on a shared counter, answer 429 with Retry-After, and keep a Redis timeout from taking down the API the limiter is there to protect.
