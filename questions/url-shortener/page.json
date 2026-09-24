@@ -1,0 +1,10 @@
+{
+  "number": 1,
+  "kicker": "Question 1",
+  "stats": [
+    { "value": "302", "label": "Redirect you defend" },
+    { "value": "Base62", "label": "Code alphabet" },
+    { "value": "40k/s", "label": "Peak redirect reads" },
+    { "value": "Unique key", "label": "The real lock" }
+  ]
+}

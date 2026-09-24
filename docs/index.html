@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LowlevelDesign</title>
+  <meta name="description" content="High-level and low-level design notes for interview prep. One folder, one page, per question.">
+  <link rel="canonical" href="https://kpvarma5899.github.io/LowlevelDesign/">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,560;9..144,640&family=IBM+Plex+Mono:wght@400;500&family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-inner">
+      <a class="mark" href="./">LowlevelDesign</a>
+      <nav class="top-nav" aria-label="Questions">
+        <a href="https://github.com/kpvarma5899/LowlevelDesign">Source</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap home">
+    <p class="kicker">Interview notes</p>
+    <h1>Low-level design, one question at a time.</h1>
+    <p class="lede">Each question is a folder. The note is the design you defend. The page is that note, readable. The <span class="path">src</span> directory is where the implementation will live.</p>
+    <ol class="index"><li>
+        <a href="url-shortener/">
+          <span class="num">01</span>
+          <span class="card-title">Design a URL shortener</span>
+          <span class="card-close">The short code is an obfuscated unique id, the database unique key is the real lock, and the redirect path never writes to the link row.</span>
+        </a>
+      </li>
+<li>
+        <a href="rate-limiter/">
+          <span class="num">02</span>
+          <span class="card-title">Design a rate limiter</span>
+          <span class="card-close">Decide with one atomic check-and-consume on a shared counter, answer 429 with Retry-After, and keep a Redis timeout from taking down the API the limiter is there to protect.</span>
+        </a>
+      </li></ol>
+  </main>
+  <script src="assets/site.js"></script>
+</body>
+</html>

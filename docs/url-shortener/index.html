@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Design a URL shortener · LowlevelDesign</title>
+  <meta name="description" content="The short code is an obfuscated unique id, the database unique key is the real lock, and the redirect path never writes to the link row.">
+  <link rel="canonical" href="https://kpvarma5899.github.io/LowlevelDesign/url-shortener/">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,560;9..144,640&family=IBM+Plex+Mono:wght@400;500&family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-inner">
+      <a class="mark" href="../">LowlevelDesign</a>
+      <nav class="top-nav" aria-label="Questions">
+        <a href="../rate-limiter/">rate limiter</a><a href="https://github.com/kpvarma5899/LowlevelDesign">Source</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap question">
+    <p class="kicker">Question 1</p>
+    <h1>Design a URL shortener</h1>
+    <p class="lede">At 5 years of experience, a correct diagram is the opening. The score comes from the questions after it: how ids are generated, what happens under a race, and what you refuse to do on the hot path.</p>
+    <p class="preface"><strong>High-level design</strong> is the system: who talks to whom, where data lives, and what you trade away to hit scale, latency, and availability.</p><p class="preface"><strong>Low-level design</strong> is one box opened up: classes, method contracts, the exact algorithm, and the concurrency control. If two requests arrive at the same millisecond, what decides the winner?</p><p class="preface">Use this shape every time: requirements, estimate, API, data model, high-level diagram, deep dive, bottlenecks.</p>
+    <blockquote class="close"><span class="close-label">Close on this</span>The short code is an obfuscated unique id, the database unique key is the real lock, and the redirect path never writes to the link row.</blockquote>
+    <div class="stats"><div class="stat"><span class="stat-value">302</span><span class="stat-label">Redirect you defend</span></div><div class="stat"><span class="stat-value">Base62</span><span class="stat-label">Code alphabet</span></div><div class="stat"><span class="stat-value">40k/s</span><span class="stat-label">Peak redirect reads</span></div><div class="stat"><span class="stat-value">Unique key</span><span class="stat-label">The real lock</span></div></div>
+    <div class="table-wrap"><table class="compare"><thead><tr><th></th><th>High-level design</th><th>Low-level design</th></tr></thead><tbody><tr><th scope="row">You draw</th><td>Clients, create service, redirect service, Redis, primary, replica, Kafka</td><td><code>UrlService</code>, <code>IdGenerator</code>, <code>Encoder</code>, <code>UrlRepository</code></td></tr><tr><th scope="row">You defend</th><td>302, cache-aside, async clicks, read-your-writes</td><td>Unique constraint, bijection over the id, thread-safe id allocation</td></tr><tr><th scope="row">They are testing</th><td>Whether you protect the hot path</td><td>Whether the code stays correct when two requests race</td></tr></tbody></table></div>
+    <nav class="sections" aria-label="Sections"><a href="#1-requirements">1. Requirements</a><a href="#2-estimate">2. Estimate</a><a href="#3-api">3. API</a><a href="#4-data-model">4. Data model</a><a href="#5-high-level-design">5. High-level design</a><a href="#6-low-level-design">6. Low-level design</a><a href="#follow-ups">Follow-ups</a><a href="#last-five-minutes">Last five minutes</a></nav>
+    <article class="prose"><h2 id="1-requirements">1. Requirements</h2>
+<p>Functional, in scope:</p>
+<ul><li>Create a short link from a long URL.</li><li>Resolve a short code and redirect.</li><li>Optional custom alias.</li><li>Optional expiry.</li></ul>
+<p>Out of scope unless they ask: user accounts, link preview, a full analytics product. Name them so the interviewer can pull one back in.</p>
+<p>Non-functional:</p>
+<ul><li>Redirect is the hot path. Reads dwarf writes, often around 100:1.</li><li>Redirect latency target: a few milliseconds on a cache hit.</li><li>Mappings are durable. A created link must still resolve after a process restart.</li><li>Short codes are unique.</li><li>Availability of redirect matters more than availability of create. A user can retry creation. A broken redirect is a dead link.</li></ul>
+<h2 id="2-estimate">2. Estimate</h2>
+<ul><li>100 million new links per month.</li><li>Write QPS ≈ 100e6 / 2.6e6 seconds ≈ <strong>40 writes/sec</strong> average. Peak 10× ≈ <strong>400 writes/sec</strong>.</li><li>Read QPS ≈ <strong>4,000/sec</strong> average, peak ≈ <strong>40,000/sec</strong>.</li><li>Row size ≈ 500 bytes. Storage ≈ 50 GB/month, a few TB over several years. This is not a storage problem. It is a lookup-latency and hot-key problem.</li></ul>
+<p>Code space: base62 (digits, lowercase, uppercase) with 7 characters is 62⁷ ≈ 3.5 trillion codes. Six characters is already ~57 billion, enough for decades at this write rate. Seven gives room for custom aliases and for never recycling expired codes quickly.</p>
+<h2 id="3-api">3. API</h2>
+<pre><code>POST /v1/urls
+{ &quot;longUrl&quot;: &quot;...&quot;, &quot;alias&quot;: &quot;sale&quot;, &quot;expireAt&quot;: &quot;2026-12-01T00:00:00Z&quot; }
+→ 201 { &quot;shortCode&quot;: &quot;aZ3kP9q&quot;, &quot;shortUrl&quot;: &quot;https://short.ly/aZ3kP9q&quot; }
+
+GET /{shortCode}
+→ 302 Location: https://original.example/very/long/path
+→ 404 unknown, 410 expired, 409 alias taken</code></pre>
+<p><code>GET</code> is the product. Everything else exists to make that lookup boring and fast.</p>
+<h2 id="4-data-model">4. Data model</h2>
+<p>One table is enough at this scale.</p>
+<div class="table-wrap"><table><thead><tr><th>Column</th><th>Role</th></tr></thead><tbody><tr><th scope="row"><code>short_code</code></th><td>Primary key. The only lookup on the hot path.</td></tr><tr><th scope="row"><code>long_url</code></th><td>Redirect target.</td></tr><tr><th scope="row"><code>user_id</code></th><td>Nullable. Secondary index for &quot;my links&quot;.</td></tr><tr><th scope="row"><code>expire_at</code></th><td>Nullable. Checked on read.</td></tr><tr><th scope="row"><code>created_at</code></th><td>Audit.</td></tr></tbody></table></div>
+<p>The redirect query is a primary-key point lookup. A unique index on <code>short_code</code>, no join, no secondary filter on the hot path.</p>
+<p>Do not put <code>click_count</code> on this row. That decision is explained below.</p>
+<p>SQL fits. The access pattern is point read and point write by key, with a strong uniqueness constraint. The uniqueness constraint is the reason to prefer a database that can enforce it.</p>
+<h2 id="5-high-level-design">5. High-level design</h2>
+<pre><code>                create                         redirect
+Client ──▶  API service ──▶ DB primary     Client ──▶ Redirect service
+                │                              │
+                │ write-through                ├─▶ Redis (short_code → long_url)
+                ▼                              ├─▶ DB replica on miss
+              Redis                            └─▶ Kafka (click event, async)
+                                                   │
+                                                   ▼
+                                              Aggregator → analytics store</code></pre>
+<ul><li><strong>Create path.</strong> Validate the URL, allocate an id, encode it, insert the row, put the mapping in cache, return the short URL.</li><li><strong>Redirect path.</strong> Cache lookup, then primary-key read, then <code>302</code>. Publishing the click is asynchronous and must not sit on the latency budget.</li><li><strong>Services are stateless.</strong> Any instance can serve any code. Scale redirect horizontally behind a load balancer. Health checks remove a bad instance.</li><li><strong>Split create and redirect</strong> once traffic justifies it. They have different SLOs. Redirect must stay up when create is rate-limited or the primary is struggling.</li></ul>
+<p>What fails first: the database, if every redirect misses cache, or a single hot key, if one viral link is requested far above everyone else. Cache hit rate is the design.</p>
+<h2 id="6-low-level-design">6. Low-level design</h2>
+<pre><code>UrlService
+  create(CreateRequest) → ShortUrl
+  resolve(shortCode) → Redirect | NotFound | Expired
+
+IdGenerator.nextId() → long          // unique, thread-safe
+Encoder.encode(long) → String        // base62
+Encoder.decode(String) → long        // only if the code is a pure encoding
+
+UrlRepository.insert(code, url)      // uniqueness enforced by the DB
+UrlRepository.find(code) → Row?
+
+Cache.get / Cache.put                // Redis, shared across instances
+ClickPublisher.publish(ClickEvent)   // non-blocking</code></pre>
+<p><code>create</code> without a custom alias:</p>
+<ol><li>Reject non-<code>http</code>/<code>https</code> URLs (<code>javascript:</code> and <code>data:</code> are an open-redirect bug).</li><li><code>id = idGenerator.nextId()</code>.</li><li><code>code = encoder.encode(obfuscate(id))</code>.</li><li><code>repository.insert(code, longUrl, expireAt)</code>.</li><li><code>cache.put(code, longUrl, ttl)</code>.</li><li>Return the short URL.</li></ol>
+<p><code>resolve</code>:</p>
+<ol><li><code>cache.get(code)</code>. On hit, fire the click event and return <code>302</code>.</li><li>On miss, <code>repository.find(code)</code>.</li><li>Missing row → <code>404</code>. <code>expire_at</code> in the past → <code>410</code>. Do not delete on the read path.</li><li>Populate cache, fire the click event, return <code>302</code>.</li></ol>
+<p>Concurrency rules:</p>
+<ul><li><code>IdGenerator</code> is thread-safe. A shared counter needs an atomic increment, or no shared in-process counter at all.</li><li>Alias uniqueness is a <strong>unique constraint</strong>, not a check-then-insert in memory. Two app servers will not see each other's in-memory set.</li><li>The cache is Redis. A local <code>HashMap</code> is invisible to the other instances and dies with the process. A local cache is only an optional L1 in front of Redis.</li></ul>
+<h2 id="follow-ups">Follow-ups</h2>
+<details class="qa" open>
+        <summary>How do you generate the short code?</summary>
+        <div class="qa-body"><p><strong>Counter, then base62.</strong> A monotonic id <code>125</code> becomes something like <code>cb</code>. No collisions, shortest codes, trivial to debug. A raw counter is guessable: <code>cb</code>, <code>cc</code>, <code>cd</code> walks the entire table. It also funnels every create through one sequence.</p>
+<p><strong>Hash the long URL (MD5 or SHA-256), keep the first 7 characters.</strong> The same URL always maps to the same code, which gives dedup for free. Collisions are real. Two different URLs can share a 7-character prefix, and you must read-before-write or retry with a longer prefix. Dedup is often wrong anyway: the same URL for two users, or the same URL with two expiry dates, should be two links.</p>
+<p><strong>Distributed unique id, then base62.</strong> This is the answer to give. Each app server generates a unique 64-bit id with no per-request database round trip, then encodes it.</p>
+<p>A Snowflake-style id is:</p>
+<ul><li>41 bits of timestamp</li><li>10 bits of machine id</li><li>12 bits of per-machine sequence (4096 ids per millisecond per machine)</li></ul>
+<p>At 400 writes/sec this is idle. Uniqueness holds as long as machine ids are distinct and the clock does not jump backwards. Codes are still roughly time-ordered, so still guessable.</p></div>
+      </details>
+<details class="qa">
+        <summary>How do you stop people enumerating every link?</summary>
+        <div class="qa-body"><p>Keep the counter. Hide it with a <strong>bijection</strong>.</p>
+<p>Run the id through a reversible mix (a Feistel permutation, or a small block cipher over the id space) and then base62-encode the result. Every id maps to exactly one code, every code maps back to exactly one id, and neighboring ids land far apart. No collision handling, no hash table of used codes, and scanning <code>aaaaaaa</code>, <code>aaaaaab</code> does not walk creation order.</p>
+<p>Uniqueness comes from the id being unique. Opacity comes from the permutation. The database unique key is the safety net.</p></div>
+      </details>
+<details class="qa">
+        <summary>Why base62 and not base64?</summary>
+        <div class="qa-body"><p>Base64 uses <code>+</code>, <code>/</code>, and <code>=</code>. Those are awkward in a path. Base62 is <code>[0-9a-zA-Z]</code>, safe in a URL with no encoding. Base58 drops <code>0</code>, <code>O</code>, <code>l</code>, <code>I</code> if links will be typed by hand. For a click-only link, base62 is the usual choice.</p></div>
+      </details>
+<details class="qa">
+        <summary>Two users request the alias <code>sale</code> at the same time</summary>
+        <div class="qa-body"><p>Check-then-insert loses. Both requests see &quot;alias free&quot;, both insert, and one mapping disappears or you throw a 500 that depends on timing.</p>
+<p>Insert directly and treat a unique-constraint violation as <code>409 Conflict</code>. The database is the lock. The unique index is the serialization point. You do not take an application-level lock across servers to protect one row.</p>
+<p>Same pattern if a generated code hits the unique index: allocate a new id and retry.</p></div>
+      </details>
+<details class="qa">
+        <summary>The user creates a link and immediately clicks it. The click 404s</summary>
+        <div class="qa-body"><p>You wrote to the primary and the redirect read a replica that has not applied the insert yet. Replication lag.</p>
+<p>Fixes, in the order to say them:</p>
+<ul><li>On create, write the cache entry yourself. The click never needs the replica.</li><li>For a short window, reads of a just-created code can go to the primary.</li><li>The client already knows the long URL from the create response. The product does not need to round-trip the new code to display it.</li></ul>
+<p>Redirect is <strong>eventually consistent</strong> for older links and <strong>read-your-writes</strong> for the creator, achieved by the cache fill on the write path.</p></div>
+      </details>
+<details class="qa">
+        <summary>301 or 302?</summary>
+        <div class="qa-body"><p><strong>302 Found</strong> (or 307 if you want to preserve the method).</p>
+<p>A 301 is cached by browsers and intermediaries as permanent. The next click never reaches you, so expiry, takedown, and click analytics silently stop working, and you cannot change the target.</p>
+<p>Use 301 only when the product explicitly wants a permanent mapping and you have accepted that you will not see those clicks again.</p></div>
+      </details>
+<details class="qa">
+        <summary>A celebrity tweet gets 500,000 clicks in a minute</summary>
+        <div class="qa-body"><p>The mapping is one key. That is fine for Redis and for a primary-key read. It is fatal if every click does <code>UPDATE urls SET click_count = click_count + 1 WHERE short_code = ?</code>. That is one hot row, row locks, and write amplification on the same table that must serve redirects.</p>
+<p>Do this instead:</p>
+<ul><li>The redirect handler appends a click event to Kafka and returns. Append is cheap and partitioned.</li><li>A consumer aggregates counts in a window and writes them to an analytics store, keyed by <code>(short_code, minute)</code>.</li><li>Unique visitors can be an approximation (HyperLogLog). Exact uniques at this volume are a different system.</li></ul>
+<p>If the hot key expires in Redis at the peak, every request falls through to the database together. That is a cache stampede. Mitigations: do not TTL a key that is being hit; use a single-flight lock so one request reloads and the rest wait; or refresh the TTL on access for hot keys.</p></div>
+      </details>
+<details class="qa">
+        <summary>How does the id generator stay correct with many app servers?</summary>
+        <div class="qa-body"><p><strong>Snowflake on each server.</strong> No coordination per id. You must assign machine ids and refuse to issue ids if the clock moves backwards.</p>
+<p><strong>Range allocation from a database sequence.</strong> The sequence is the source of truth, and each app server leases a block, for example 10,000 ids, with one sequence jump per block. Servers then hand out ids from memory. A crash loses the unused tail of the block. Gaps are acceptable. Contention on the sequence drops by the block size. This is the same idea as a sequence cache.</p>
+<p>At 40–400 writes/sec, either design is comfortable. The bottleneck you removed is a network round trip to the database on every create.</p></div>
+      </details>
+<details class="qa">
+        <summary>What if the same long URL is submitted twice?</summary>
+        <div class="qa-body"><p>Default: <strong>two short codes.</strong> Callers have different owners, expiries, and analytics. Deduping by URL couples strangers together and makes deletion wrong: user A deletes &quot;their&quot; link and breaks user B.</p>
+<p>If the product wants dedup, it is a separate feature with an explicit key <code>(user_id, long_url)</code>, not an accident of hashing.</p></div>
+      </details>
+<details class="qa">
+        <summary>How do expired links get cleaned up?</summary>
+        <div class="qa-body"><p>On the read path, compare <code>expire_at</code> and return 410.</p>
+<p>A scheduled job deletes or archives rows that expired days ago, in batches, off the hot path. Recycling a code immediately is dangerous: caches, browser history, and shared posts will send people to a new destination. Quarantine codes for a long time, or never reuse them. The code space is large enough.</p></div>
+      </details>
+<details class="qa">
+        <summary>The primary database is down. What still works?</summary>
+        <div class="qa-body"><p>Redirects for cached codes keep working. That is most of the traffic if the hit rate is high.</p>
+<p>Creates fail. Fail them fast with a timeout rather than queueing unboundedly.</p>
+<p>Uncached codes fail until the primary or a promotable replica is back. A read replica can serve misses only if it is caught up enough for the staleness budget. It cannot accept the unique insert.</p></div>
+      </details>
+<details class="qa">
+        <summary>What do you rate-limit, and where?</summary>
+        <div class="qa-body"><p>Creation, per user and per IP. Redirects are sometimes abused by bots scanning the code space. A cheap reject for obviously invalid codes (wrong length, bad alphabet) happens before Redis. A bloom filter of known codes is a later optimization, not the core design.</p>
+<p>See <a href="../rate-limiter/">rate limiter</a> for the limiter itself. Limit <code>POST /v1/urls</code>. Give <code>GET /{shortCode}</code> a much higher ceiling whose job is to blunt random scanning. A viral link is a cache problem, not a rate-limit problem.</p></div>
+      </details>
+<h2 id="last-five-minutes">Last five minutes</h2>
+<ul><li><strong>Single points of failure:</strong> the id lease service if you chose ranges; the primary for creates. Redirect is designed to survive without either, for cached keys.</li><li><strong>What you monitor:</strong> redirect p99, cache hit rate, create error rate, unique-constraint conflicts, Kafka consumer lag, replication lag.</li><li><strong>What breaks at 10×:</strong> not storage. Hot keys, cache stampede, and click-event volume. The next design change is partitioning the analytics stream and treating the top keys as their own cache tier.</li></ul></article>
+    <footer class="end">
+      <p><a href="../rate-limiter/">Design a rate limiter</a></p>
+      <p class="end-links">
+        <a href="https://github.com/kpvarma5899/LowlevelDesign/blob/main/questions/url-shortener/README.md">Note in the repo</a>
+        <a href="https://github.com/kpvarma5899/LowlevelDesign/tree/main/questions/url-shortener/src">Implementation folder</a>
+      </p>
+    </footer>
+  </main>
+  <script src="../assets/site.js"></script>
+</body>
+</html>

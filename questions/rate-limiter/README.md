@@ -87,6 +87,8 @@ Rule: 10 requests in any 10 seconds. The client has a full budget, then sends 10
 | 10 requests at t = 9s | 10 | 10 | 10 |
 | 10 requests at t = 10s | 10 | 0 | 1 |
 
+<!-- widget:boundary-chart -->
+
 The sliding log keeps every timestamp, drops those older than 10 seconds, and at t = 10s still sees the ten from t = 9s, so the second burst is fully denied. The token bucket spends all 10 tokens at t = 9s, refills one token over the next second, and allows a single request from the second burst. Same steady rate, and the burst size is exactly the capacity you configured.
 
 ### Token bucket math
@@ -111,6 +113,8 @@ Click-through you can do on paper:
 4. Advance one second. One send is allowed again.
 
 That is the burst, then the rate.
+
+<!-- widget:token-bucket -->
 
 ### Sliding window counter
 

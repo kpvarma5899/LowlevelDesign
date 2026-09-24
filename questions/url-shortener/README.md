@@ -239,7 +239,7 @@ Uncached codes fail until the primary or a promotable replica is back. A read re
 
 Creation, per user and per IP. Redirects are sometimes abused by bots scanning the code space. A cheap reject for obviously invalid codes (wrong length, bad alphabet) happens before Redis. A bloom filter of known codes is a later optimization, not the core design.
 
-See [rate-limiter.md](rate-limiter.md) for the limiter itself. Limit `POST /v1/urls`. Give `GET /{shortCode}` a much higher ceiling whose job is to blunt random scanning. A viral link is a cache problem, not a rate-limit problem.
+See [rate limiter](../rate-limiter/README.md) for the limiter itself. Limit `POST /v1/urls`. Give `GET /{shortCode}` a much higher ceiling whose job is to blunt random scanning. A viral link is a cache problem, not a rate-limit problem.
 
 ## Last five minutes
 
