@@ -1,0 +1,10 @@
+{
+  "number": 3,
+  "kicker": "Question 3",
+  "stats": [
+    { "value": "Position", "label": "Who says a move is legal" },
+    { "value": "Strategy", "label": "How a piece proposes squares" },
+    { "value": "One actor", "label": "What serializes two moves" },
+    { "value": "Move log", "label": "What you persist" }
+  ]
+}
