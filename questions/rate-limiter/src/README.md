@@ -1,12 +1,25 @@
 # Rate limiter
 
-Source for this question lives in this folder. The problem is the [note](../README.md). The readable page is https://kpvarma5899.github.io/LowlevelDesign/rate-limiter/.
+Source for this question. The problem is the [note](../README.md). The page is https://kpvarma5899.github.io/LowlevelDesign/rate-limiter/.
 
-The implementation is not written yet. When it is, these are the patterns:
+Each algorithm is one class, and the fields of that class are the data structure. The comment on the class says why.
 
-- **Strategy.** `TokenBucket` is the algorithm you defend. Fixed window, sliding log, sliding window, and leaky bucket are the other strategies, not the default.
-- **Repository.** `TokenBucketStore.tryConsume` is one atomic check-and-consume. `InMemoryTokenBucket` comes first. Redis, behind the same interface, is the shared store.
-- **Decorator.** A local deny-cache sits in front of the store so a client that was just rejected does not stampede Redis. Allows are not cached.
-- **Service.** `RateLimiter.decide` returns allow, or `429` with `Retry-After`. A store timeout must not hang the caller.
+| Class | Structure | Why |
+|---|---|---|
+| `FixedWindow` | one `int`, plus the bucket start | The clock bucket is the only thing you count. You discarded the timestamps. |
+| `SlidingWindowLog` | `ArrayDeque` of timestamps | Oldest at the front. Expire and append are O(1). |
+| `SlidingWindowCounter` | previous count and current count | You will not store every request. The weight assumes they were spread evenly. |
+| `TokenBucket` | `tokens`, `lastRefillMs` | The closed form of a bucket. No drip thread. |
+| `LeakyBucket` | level, `lastLeakMs` | The queue in the diagram, stored as its level. |
+| `KeyedTokenBuckets` | `ConcurrentHashMap` | `compute` is the per-key lock. A `HashMap` is not safe. One global lock couples strangers. |
+| `redis/sliding-window-log.lua` | Redis sorted set | Score is time. Member is a unique id. Trim, count, and add are one script. |
+| `RedissonRateLimiters` | Redisson `RRateLimiter` and `RScript` | The library's limiter is a token bucket. The exact window is still your Lua. Needs the Redisson jar. |
 
-Tests pass time in explicitly, and show that two concurrent consumes cannot both take the last token.
+From this directory:
+
+```bash
+javac -d out src/java/com/lld/ratelimit/*.java src/java/com/lld/ratelimit/redis/SlidingWindowLogScript.java
+java -cp out com.lld.ratelimit.AlgorithmDemo
+```
+
+`AlgorithmDemo` checks the boundary (fixed window allows 20, the log allows 10, the bucket allows 11) and that 32 threads cannot all take the last token.

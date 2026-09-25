@@ -80,6 +80,16 @@ Pick the token bucket. It allows a bounded burst and then enforces a steady rate
 | Sliding log | One timestamp per request | Exact over any window | Right answer at low QPS. Memory and CPU follow the request rate. |
 | Sliding window counter | 2 counters | Approximate | The compromise when a log is too big and a fixed window is too crude. |
 
+The Java for each store is in [src/java/com/lld/ratelimit](https://github.com/kpvarma5899/LowlevelDesign/tree/main/questions/rate-limiter/src/java/com/lld/ratelimit). The class comment is the reason for the structure. `AlgorithmDemo` checks the boundary numbers below.
+
+| Algorithm | What you actually store | Why that, and not a list of requests |
+|---|---|---|
+| Fixed window | One `int` and the bucket start | You only need how many fell in this clock bucket. Throwing away each timestamp is the boundary bug. |
+| Sliding window log | `ArrayDeque` of timestamps, or a Redis sorted set | You must delete "older than T" and count what remains. A hash or a counter can do neither. |
+| Sliding window counter | Previous count and current count | You refuse to store every request, and you accept an even-spread approximation. |
+| Token bucket | `tokens` and `lastRefillMs` | Two numbers are the queue of tokens, without a thread dripping them. |
+| Leaky bucket | Water level and `lastLeakMs` | The queue in the diagram is the level. Saving every request does not change the drain. |
+
 ### The boundary bug
 
 Rule: 10 requests in any 10 seconds. The client has a full budget, then sends 10 requests at t = 9s and another 10 at t = 10s. Fixed windows are aligned to t = 0, so those bursts fall in two different counters and both succeed. Twenty requests land in one second.
@@ -118,9 +128,69 @@ That is the burst, then the rate.
 
 <!-- widget:token-bucket -->
 
+On a denial, still store the refilled `tokens` and `lastRefillMs`. Do not subtract the cost. If you store the new token count and leave the old timestamp, the next call adds the same elapsed time on top of tokens that already include it.
+
+The class is `TokenBucket`. Many identities live in a `ConcurrentHashMap`, and `compute` holds the bin lock for that key while the two numbers change. A `HashMap` loses updates when two gateway threads create the same key. One lock around the whole map makes unrelated users queue. That class is `KeyedTokenBuckets`.
+
+### Sliding window log
+
+An exact window is a log. Drop every hit older than `now − window`, count what is left, allow if the count is under the limit, then append now.
+
+In one process the log is an `ArrayDeque`. Time moves forward, so the oldest hit is always at the front. `peekFirst`, `removeFirst`, and `addLast` are O(1). A `HashSet` cannot find "older than T" without a scan. A map keyed by the timestamp merges two requests from the same millisecond into one entry, and the limit under-counts. A `TreeMap` can delete from the middle, and this algorithm never does.
+
+```java
+long cutoff = nowMs - windowMs;
+while (!hits.isEmpty() && hits.peekFirst() <= cutoff) {
+    hits.removeFirst();
+}
+if (hits.size() >= limit) {
+    long retryAt = hits.peekFirst() + windowMs;
+    return Decision.deny(limit, 0, retryAt - nowMs);
+}
+hits.addLast(nowMs);
+```
+
+That class is `SlidingWindowLog`. Ten requests at t = 9s fill a limit of 10. At t = 10s the deque still holds them, so the next ten are denied. The fixed window allows all twenty.
+
+Across servers the same log is a Redis sorted set. Redis stores it as a hash plus a skiplist: the hash finds a member, the skiplist orders the scores. The score is the timestamp in milliseconds. The member is a unique id, not the timestamp. `ZADD` replaces a member that is already there, so two requests in the same millisecond would count as one if the member were the clock.
+
+Limit 2, window 10 seconds, one key.
+
+| At | Command | What is in the set |
+|---|---|---|
+| t = 1s | `ZADD` req-a, score 1000 | req-a |
+| t = 2s | `ZADD` req-b, score 2000 | req-a, req-b |
+| t = 3s | cutoff is 3000 − 10000, so `ZREMRANGEBYSCORE` removes nothing. `ZCARD` is 2 | deny |
+| t = 11s | `ZREMRANGEBYSCORE -inf 1000` | req-a is score 1000, so it goes |
+| t = 11s | `ZCARD` is 1, then `ZADD` req-c | req-b, req-c, allow |
+
+The other Redis types lose the operation you need:
+
+- A string is one counter. It has no timestamp to expire.
+- A hash is a field lookup. Dropping old fields means reading every field.
+- A list is ordered by insertion. `LTRIM` cuts by index, not by time. You can `LPOP` in a loop only after parsing a timestamp out of each value. `ZREMRANGEBYSCORE` is that delete in one command.
+
+The script is [src/redis/sliding-window-log.lua](https://github.com/kpvarma5899/LowlevelDesign/blob/main/questions/rate-limiter/src/redis/sliding-window-log.lua). `ZREMRANGEBYSCORE`, then `ZCARD`, then `ZADD` only if the card is under the limit, then `PEXPIRE` so an idle key disappears. The member is `now` plus a random id.
+
+Those three commands, sent as three round trips, are not one decision. Limit 2, one member already stored. Client A and client B both `ZCARD` and both see 1. Both `ZADD`. The set holds 3. The budget was 2.
+
+`MULTI`/`EXEC` does not close that. The client has to queue `ZADD` before `EXEC` returns the `ZCARD`, so it cannot skip the add. `WATCH` and a retry is optimistic locking, and a hot key aborts every overlapping request. Redis runs a Lua script to the end with no other command interleaved on that node. The branch and the write are one step. That is the same reason the token bucket is a script, applied to a sorted set instead of two numbers.
+
+[Redisson](https://github.com/redisson/redisson) already ships the token-bucket form of this. `RRateLimiter.tryAcquire` refills permits from elapsed time inside one Lua script. It does not store a sorted set.
+
+```java
+RRateLimiter limiter = redisson.getRateLimiter("rl:{user:42}:create");
+limiter.trySetRate(RateType.OVERALL, 10, 1, RateIntervalUnit.SECONDS);
+boolean allowed = limiter.tryAcquire();
+```
+
+`RateType.OVERALL` is one budget for every pod. `PER_CLIENT` gives each JVM its own budget, which is the 20-pod bug behind a library call. The `{user:42}` hash tag pins the key to one cluster slot.
+
+`RScoredSortedSet` is the Java type for the sorted set. `removeRangeByScore`, then `size`, then `add` is the same three-command race. The exact window is still one `RScript.eval` of the Lua above. Both calls are in `RedissonRateLimiters`. That file needs the Redisson jar. The in-memory demo does not.
+
 ### Sliding window counter
 
-Keep the previous window's count and the current window's count.
+This is not the sorted set. Keep the previous window's count and the current window's count.
 
 ```
 estimate = previous × (1 − elapsed / window) + current
@@ -128,11 +198,11 @@ estimate = previous × (1 − elapsed / window) + current
 
 Window 60s, limit 100. Previous window closed at 80. We are 15s into the current window, and 20 requests have landed in it. The previous window still overlaps the sliding 60s by 45/60 = 0.75, so estimate = 80 × 0.75 + 20 = 80. The next request is allowed. If the current count were 41, estimate = 60 + 41 = 101, and you deny.
 
-The lie in the formula: it assumes the previous window's requests were spread evenly. If all 80 arrived in the last second of that window, the true sliding count is higher than the estimate, and you let a bit too much through. Say that limitation in the same breath as the formula.
+The lie in the formula: it assumes the previous window's requests were spread evenly. If all 80 arrived in the last second of that window, the true sliding count is higher than the estimate, and you let a bit too much through. Say that limitation in the same breath as the formula. Two ints are the whole store, which is why you cannot go back and check. The class is `SlidingWindowCounter`. `estimate(80, 20, 15s, 60s)` is 80. `estimate(80, 41, 15s, 60s)` is 101, and you deny.
 
 ### Leaky bucket
 
-A leaky bucket drains at a constant rate. A request either occupies a slot in a queue that empties at that rate, or it is dropped when the queue is full. The downstream sees a flat arrival rate. A token bucket lets the client spend a saved-up burst immediately, which is what you want for an interactive API. A leaky bucket is what you want in front of a database or a worker pool that falls over on spikes and is fine at a steady pace. Pick per rule, not once for the whole company.
+A leaky bucket drains at a constant rate. The picture is a queue that empties at that rate, and a request is dropped when the queue is full. The queue is the right drawing and the wrong store: the level after `elapsed × rate` is the whole queue. `LeakyBucket` keeps that level and `lastLeakMs`. The downstream sees a flat arrival rate. A token bucket lets the client spend a saved-up burst immediately, which is what you want for an interactive API. A leaky bucket is what you want in front of a database or a worker pool that falls over on spikes and is fine at a steady pace. Pick per rule, not once for the whole company. `FixedWindow` is the one-counter version of the boundary bug, kept so you can show it.
 
 ## One limit, many servers
 
@@ -225,7 +295,7 @@ Inside the atomic section, for a single rule:
 | 1 | Read tokens and `last_refill_ms`. Missing key → tokens = capacity, last = now. |
 | 2 | `elapsed = max(0, now − last)`. Guard a backwards clock. |
 | 3 | `tokens = min(capacity, tokens + elapsed × rate)` |
-| 4 | If tokens < cost, return denied. `retry = (cost − tokens) / rate`. Do not write a spend. |
+| 4 | If tokens < cost, return denied. `retry = (cost − tokens) / rate`. Write the refilled tokens and the new timestamp. Do not subtract the cost. |
 | 5 | Else tokens = tokens − cost, write both fields, refresh TTL, return allowed. |
 
 For several rules, run steps 1–4 for every rule first. If any rule denies, write nothing. If all allow, apply every decrement and then return.
@@ -247,6 +317,18 @@ The in-memory store still has threads. One lock per key, or a striped lock, cove
 | Fail-open count | Must show up on the dashboard |
 
 ## Follow-ups
+
+### How do you implement a sliding window in Redis?
+
+A sorted set per identity. Score is the timestamp. Member is a unique id, because `ZADD` overwrites a duplicate member and two requests in the same millisecond would count as one. `ZREMRANGEBYSCORE` drops scores at or below `now − window`, `ZCARD` counts, `ZADD` records the allow. A string has no timestamps. A hash cannot range-delete. A list trims by index, not by time. In one process the same log is an `ArrayDeque`, oldest at the front, because you only ever delete from that end. The class is `SlidingWindowLog`. The script is `src/redis/sliding-window-log.lua`.
+
+### Why does the sorted set need a Lua script?
+
+`ZCARD` then `ZADD` from two clients both see "one under the limit" and both insert. `MULTI`/`EXEC` cannot look at `ZCARD` and then decide to skip `ZADD`, because the result arrives only at `EXEC` and the add was already queued. `WATCH` retries the whole read, and a hot key never commits. The script runs the trim, the count, and the conditional add with no other command interleaved. Same atomicity as the token-bucket script. The structure changed. The lock did not.
+
+### Redisson already has a rate limiter. Do you still write the script?
+
+For a token bucket, no. `RRateLimiter.trySetRate(RateType.OVERALL, …)` and `tryAcquire` are one Lua script that refills permits from elapsed time. `OVERALL` is one budget for every pod. `PER_CLIENT` is a private budget per JVM, which brings the 20-pod bug back. For an exact sliding window, yes, you still write the script. Redisson's limiter is not a sorted set. `RScoredSortedSet` exposes the ZSET, and calling `removeRangeByScore`, `size`, and `add` separately races. `RScript.eval` of the sliding-log Lua is the atomic form. Both are in `RedissonRateLimiters`.
 
 ### Why token bucket, in one sentence?
 
