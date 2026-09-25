@@ -153,7 +153,7 @@ For a castle, `Legality` also requires, on the position before the move:
 
 Kingside those squares are f1 and g1 empty, and e1, f1, g1 not attacked. Queenside, b1, c1, and d1 are empty, and e1, d1, and c1 are not attacked. b1 is empty. It is not a square the king walks through, so an attack on b1 does not by itself forbid queenside castling.
 
-En passant needs no extra rule. White pawn on d5, Black has just played e7-e5, White king on e1, Black rook on e8. Capturing en passant onto e6 removes the pawn on e5 and opens the file. The resulting position has the king attacked, so `Legality` drops the move. A hand-written "en passant pin" check is a second copy of king safety.
+En passant needs no extra rule. White pawn on e5, Black has just played d7-d5, White king on g5, Black rook on a5. Capturing onto d6 leaves the fifth rank, and removing the pawn on d5 opens that rank. The white pawn does not stay behind as a blocker, because it has left the rank. The resulting position has the king attacked, so `Legality` drops the move. A capture onto the file of the rook, such as d5xe6 with the rook on e8, leaves the capturer standing on that file and does not open it. A hand-written "en passant pin" check is a second copy of king safety.
 
 Draws, after a move that is not mate or stalemate:
 
@@ -202,7 +202,7 @@ One table per piece for geometry, including pawn attack versus pawn move. Then p
 - The knight on e2 is pinned. Six geometric moves, zero legal.
 - Kingside castle with a rook attacking f1 and not g1. Rejected.
 - Kingside castle while the king is in check on the e-file, with g1 safe. Rejected.
-- The en passant that opens the e-file. Rejected, with no special case in the test's production code.
+- The en passant that opens the fifth rank. Rejected, with no special case in the test's production code.
 - Promotion omitted on the last rank. Rejected. Four different promotions to the same square. All legal.
 - A stalemate position and a mate that differs by one square.
 - The same position reached three times, once with a harmless en passant square set. Still a draw.
@@ -228,7 +228,7 @@ The destination test does not look at the square the king crossed, and a castle 
 
 ### An en passant capture opens a line to the king. Where is that rule?
 
-Nowhere of its own. Apply the capture, including removing the pawn that was passed, and ask whether the mover's king is attacked. White pawn d5 takes on e6, the black pawn on e5 disappears, the rook on e8 sees the king on e1. The move is dropped by the same filter as a pin. A second "en passant pin" function will drift from that filter.
+Nowhere of its own. Apply the capture, including removing the pawn that was passed, and ask whether the mover's king is attacked. White pawn e5 takes on d6, the black pawn on d5 disappears, and both pawns have left the fifth rank, so the rook on a5 sees the king on g5. The move is dropped by the same filter as a pin. A second "en passant pin" function will drift from that filter.
 
 ### Where do you put `hasMoved`?
 
